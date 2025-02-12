@@ -39,12 +39,6 @@ The template includes a `test.py` cog with a `/test` command as an example. You 
 
 You're right, the previous format for the configuration section might be a bit difficult to read. Here's an alternative using a table, which should provide a clearer and more organized presentation:
 
-```
-You're absolutely correct! I apologize for the incorrect table formatting.
-
-Here's the corrected version of the configuration section with the proper Markdown table syntax:
-
-```
 ## Configuration
 
 The `config.json` file allows you to customize various aspects of the Discord bot. Here's a breakdown of the configuration options:
