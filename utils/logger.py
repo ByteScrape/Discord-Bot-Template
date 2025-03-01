@@ -1,122 +1,134 @@
+#!/usr/bin/env python3
+import datetime
 import logging
 import re
-from datetime import datetime
+import sys
+import tarfile
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from typing import Optional
 
-import emoji
-from colorama import Fore
-from utils.config import Config
+from colorama import Fore, Style, init
 
-# Precompile emoji pattern for reuse
-_EMOJI_PATTERN = re.compile(
-    r"[\U0001F600-\U0001F64F"
-    r"\U0001F300-\U0001F5FF"
-    r"\U0001F680-\U0001F6FF"
-    r"\U0001F1E0-\U0001F1FF"
-    r"\U00002500-\U00002587"
-    r"\U00002589-\U00002BEF"
-    r"\U00002702-\U000027B0"
-    r"\U000024C2-\U00002587"
-    r"\U00002589-\U0001F251"
-    r"\U0001f926-\U0001f937"
+# Initialize Colorama for Windows ANSI support
+init(autoreset=True)
+
+# Precompiled regex patterns
+EMOJI_PATTERN = re.compile(
+    r"["
+    r"\U0001F600-\U0001F64F\U0001F300-\U0001F5FF"
+    r"\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF"
+    r"\u200d\u23cf\u23e9\u23ea-\u23ed\u23ef\u23f0-\u23f3"
+    r"\u25A0-\u25FF\u2600-\u26FF\u2700-\u27BF\u2B00-\u2BFF"
     r"\U00010000-\U0010ffff"
-    r"\u2640-\u2642"
-    r"\u2600-\u2B55"
-    r"\u200d"
-    r"\u23cf"
-    r"\u23e9"
-    r"\u231a"
-    r"\ufe0f"
-    r"\u3030"
-    r"\u231b"
-    r"\u2328"
-    r"\u23ea"
-    r"\u23eb"
-    r"\u23ec"
-    r"\u23ed"
-    r"\u23ee"
-    r"\u23ef"
-    r"\u23f0"
-    r"\u23f1"
-    r"\u23f2"
-    r"\u23f3]+",
+    r"]+",
     flags=re.UNICODE
 )
 
-
-def remove_emoji(string: str) -> str:
-    return _EMOJI_PATTERN.sub(r"", string)
+SAFE_CHARS = re.compile(r'[^a-zA-Z0-9_\-\.\s]')
 
 
-class CustomFormatter(logging.Formatter):
-    def __init__(self, fmt, datefmt=None):
+class EnhancedFormatter(logging.Formatter):
+    COLOR_MAP = {
+        logging.DEBUG: Fore.CYAN,
+        logging.INFO: Fore.GREEN,
+        logging.WARNING: Fore.YELLOW,
+        logging.ERROR: Fore.RED,
+        logging.CRITICAL: Fore.WHITE + Style.BRIGHT + Fore.RED
+    }
+
+    def __init__(self, fmt: str, datefmt: Optional[str] = None, tty_only: bool = True):
         super().__init__(fmt, datefmt)
-        self.fmt = fmt
-        self.datefmt = datefmt
-        self.FORMATS = {
-            logging.DEBUG: Fore.LIGHTCYAN_EX + fmt + Fore.RESET,
-            logging.INFO: Fore.LIGHTYELLOW_EX + fmt + Fore.RESET,
-            logging.WARNING: Fore.LIGHTRED_EX + fmt + Fore.RESET,
-            logging.ERROR: Fore.LIGHTRED_EX + fmt + Fore.RESET,
-            logging.CRITICAL: Fore.LIGHTRED_EX + fmt + Fore.RESET,
-        }
+        self.tty_only = tty_only
+        self.use_colors = sys.stdout.isatty() or not tty_only
 
     def format(self, record):
-        if not hasattr(record, "emoji_is_present"):
-            record.emoji_is_present = False
+        msg = super().format(record)
+        msg = self._process_special_chars(msg)
+        return self._apply_colors(msg, record.levelno)
 
-        if hasattr(record, "emoji"):
-            record.msg = emoji.emojize(f"{record.emoji} {record.msg.strip()}")
-            record.emoji_is_present = True
+    def _process_special_chars(self, msg):
+        # Replace special characters
+        msg = msg.replace("\u2192", "-->")
+        if any(ord(c) > 0x7F for c in msg):
+            return EMOJI_PATTERN.sub("", msg)
+        return msg
 
-        if "\u2192" in record.msg:
-            record.msg = record.msg.replace("\u2192", "-->")
-            record.msg = remove_emoji(record.msg)
-
-        # Choose the format for the current log level
-        log_fmt = self.FORMATS.get(record.levelno, self.fmt)
-        formatter = logging.Formatter(fmt=log_fmt, datefmt=self.datefmt)
-        return formatter.format(record)
-
-
-logger = logging.getLogger(Config().name)
-logger.setLevel(logging.DEBUG)
-
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.DEBUG)
-console_handler.setFormatter(
-    CustomFormatter(fmt="%(asctime)s - %(levelname)s: %(message)s", datefmt="%d/%m/%y %H:%M:%S")
-)
+    def _apply_colors(self, msg, level):
+        if self.use_colors:
+            color = self.COLOR_MAP.get(level, '')
+            return f"{color}{msg}{Style.RESET_ALL}"
+        return msg
 
 
-def save():
-    logs_path = Path.cwd() / "logs"
-    logs_path.mkdir(parents=True, exist_ok=True)
+def archive_old_logs(logs_dir: Path, current_log_file: Path) -> None:
+    """
+    Archive any existing log files (except the one that is newly created)
+    into a tar.gz file and then remove those log files.
+    """
+    old_logs = [log_file for log_file in logs_dir.glob("*.log") if log_file != current_log_file]
+    if not old_logs:
+        return
 
-    # Use current date and time as the file name
-    now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    logs_file = logs_path / f"{now_str}.log"
+    archive_name = logs_dir / f"logs_archive_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.tar.gz"
+    with tarfile.open(archive_name, "w:gz") as tar:
+        for log_file in old_logs:
+            tar.add(log_file, arcname=log_file.name)
 
-    file_handler = TimedRotatingFileHandler(
-        filename=str(logs_file),
-        when="D",
-        interval=1,
-        backupCount=7,
-        encoding="utf-8",
-        delay=False
-    )
-    file_handler.setFormatter(
-        logging.Formatter(
-            fmt="%(asctime)s - %(levelname)s: %(message)s",
-            datefmt="%d/%m/%y %H:%M:%S"
+    for log_file in old_logs:
+        try:
+            log_file.unlink()
+        except Exception as err:
+            print(f"Error deleting log file {log_file}: {err}", file=sys.stderr)
+
+
+def configure_logging(
+    name: str = "logger",
+    path: str = "logs",
+    level: int = logging.DEBUG,
+    save: bool = False
+):
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    # Remove existing handlers to avoid duplicate logs.
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
+    # Set up the console handler.
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(
+        EnhancedFormatter(
+            "%(asctime)s - %(levelname)s: %(message)s",
+            datefmt="%d/%m/%y %H:%M:%S",
+            tty_only=True
         )
     )
-    file_handler.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
+    if save:
+        # Ensure the log directory exists.
+        logs_dir = Path(path).absolute()
+        logs_dir.mkdir(parents=True, exist_ok=True)
 
-if Config().save_logs:
-    save()
+        # Create a new unique log file name using the current timestamp.
+        new_log_filename = datetime.datetime.now().strftime("%d-%m-%Y_%H-%M-%S") + ".log"
+        new_log_file = logs_dir / new_log_filename
 
-logger.addHandler(console_handler)
+        # Archive all previous log files that are not the current one.
+        archive_old_logs(logs_dir, new_log_file)
+
+        # Set up a file handler that rotates at midnight.
+        file_handler = TimedRotatingFileHandler(
+            filename=str(new_log_file),
+            when="midnight",
+            backupCount=7,
+            encoding="utf-8"
+        )
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s - %(levelname)s: %(message)s",
+            datefmt="%d/%m/%y %H:%M:%S"
+        ))
+        logger.addHandler(file_handler)
+
+    return logger
